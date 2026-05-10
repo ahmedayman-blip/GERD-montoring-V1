@@ -40,12 +40,13 @@
     }
     button:hover { background-color: #0052a3; }
     button:disabled { background-color: #ccc; cursor: not-allowed; }
-    .status { margin-top: 10px; font-size: 12px; color: #555; padding: 5px; }
+    .status { margin-top: 10px; font-size: 12px; padding: 5px; }
     h3 { margin: 0 0 10px 0; color: #333; }
     hr { margin: 10px 0; }
     .info { font-size: 11px; color: #666; margin: 5px 0; }
     .error { color: #cc0000; }
     .success { color: #008800; }
+    .warning { color: #cc6600; }
   </style>
 </head>
 <body>
@@ -61,7 +62,7 @@
     <input type="checkbox" id="borderCheckbox" disabled style="width:auto; margin-right:8px;">
     Show border of largest water body (red outline)
   </label>
-  <div id="status" class="status">⚡ Click "Login to Earth Engine" to start</div>
+  <div id="status" class="status warning">⚡ Please login to Earth Engine</div>
   <button id="loginBtn">🔐 Login to Earth Engine</button>
 </div>
 
@@ -78,6 +79,7 @@ let map, isLoggedIn = false;
 let roiLayer, currentWaterLayer, currentBorderLayer;
 let waterCache = {}, borderCache = {};
 let currentMonth = null;
+let ee = null;
 
 // Parameters
 const startYear = 2021, endYear = 2025;
@@ -93,27 +95,37 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
 }).addTo(map);
 
 // ============================================================
-// LOAD EARTH ENGINE API
+// LOAD EARTH ENGINE API - FIXED VERSION
 // ============================================================
 function loadEarthEngineAPI() {
   return new Promise((resolve, reject) => {
+    // Check if already loaded
     if (window.ee) {
+      ee = window.ee;
       resolve();
       return;
     }
+    
+    // Load the Earth Engine API script
     const script = document.createElement('script');
-    script.src = 'https://code.earthengine.google.com/ee-api.js';
-    script.onload = () => {
-      // Wait for ee to be initialized
-      const checkEE = setInterval(() => {
-        if (window.ee && window.ee.data) {
-          clearInterval(checkEE);
-          resolve();
-        }
-      }, 100);
+    script.src = 'https://code.earthengine.google.com/ee-api.js?init=initEE';
+    script.async = true;
+    
+    // Set up global callback
+    window.initEE = function() {
+      if (window.ee) {
+        ee = window.ee;
+        resolve();
+      } else {
+        reject(new Error('Earth Engine API failed to initialize'));
+      }
     };
-    script.onerror = reject;
+    
+    script.onerror = () => reject(new Error('Failed to load Earth Engine API script'));
     document.head.appendChild(script);
+    
+    // Timeout after 15 seconds
+    setTimeout(() => reject(new Error('Earth Engine API load timeout')), 15000);
   });
 }
 
@@ -124,41 +136,49 @@ async function authenticate() {
   const statusDiv = document.getElementById('status');
   const loginBtn = document.getElementById('loginBtn');
   
-  statusDiv.innerHTML = '⏳ Authenticating with Earth Engine...';
+  statusDiv.innerHTML = '<span class="warning">⏳ Loading Earth Engine API...</span>';
   loginBtn.disabled = true;
   
   try {
+    // Load API first
     await loadEarthEngineAPI();
+    statusDiv.innerHTML = '<span class="warning">⏳ Earth Engine API loaded. Authenticating...</span>';
     
     // Use Earth Engine's built-in authentication
     ee.data.authenticate(
       'https://www.googleapis.com/auth/earthengine',
-      async () => {
+      () => {
         // Initialize Earth Engine
-        await new Promise((resolve, reject) => {
-          ee.initialize(null, null, resolve, reject);
-        });
-        
-        isLoggedIn = true;
-        statusDiv.innerHTML = '✅ Authenticated! Loading study area...';
-        await loadROI();
-        populateMonths();
-        
-        document.getElementById('monthSelect').disabled = false;
-        document.getElementById('borderCheckbox').disabled = false;
-        loginBtn.style.display = 'none';
-        statusDiv.innerHTML = '✅ Ready! Select a month to view water extent.';
+        ee.initialize(null, null, 
+          () => {
+            // Success
+            isLoggedIn = true;
+            statusDiv.innerHTML = '<span class="success">✅ Authenticated! Loading study area...</span>';
+            loadROI();
+            populateMonths();
+            
+            document.getElementById('monthSelect').disabled = false;
+            document.getElementById('borderCheckbox').disabled = false;
+            loginBtn.style.display = 'none';
+            statusDiv.innerHTML = '<span class="success">✅ Ready! Select a month to view water extent.</span>';
+          },
+          (error) => {
+            console.error('EE init error:', error);
+            statusDiv.innerHTML = '<span class="error">❌ Earth Engine initialization failed. Please make sure you have Earth Engine access.</span>';
+            loginBtn.disabled = false;
+          }
+        );
       },
       (error) => {
         console.error('Auth error:', error);
-        statusDiv.innerHTML = '❌ Authentication failed. Please make sure you have Earth Engine access.';
+        statusDiv.innerHTML = '<span class="error">❌ Authentication failed. Please make sure you:\n1. Have a Google account\n2. Have Earth Engine access (sign up at earthengine.google.com)\n3. Are logged into Google in this browser</span>';
         loginBtn.disabled = false;
         loginBtn.style.display = 'block';
       }
     );
   } catch (error) {
     console.error('Error:', error);
-    statusDiv.innerHTML = '❌ Error loading Earth Engine API. Please refresh and try again.';
+    statusDiv.innerHTML = `<span class="error">❌ ${error.message}. Please refresh the page and try again.</span>`;
     loginBtn.disabled = false;
   }
 }
@@ -169,14 +189,13 @@ async function authenticate() {
 async function loadROI() {
   try {
     const roi = ee.FeatureCollection(ROI_ASSET);
-    const roiMap = await new Promise((resolve) => {
-      roi.getMap({color: 'red', fillColor: '00000000'}, resolve);
+    roi.getMap({color: 'red', fillColor: '00000000'}, (roiMap) => {
+      if (roiLayer) map.removeLayer(roiLayer);
+      roiLayer = L.tileLayer(roiMap.tile_fetcher.url).addTo(map);
     });
-    if (roiLayer) map.removeLayer(roiLayer);
-    roiLayer = L.tileLayer(roiMap.tile_fetcher.url).addTo(map);
   } catch (error) {
     console.error('Error loading ROI:', error);
-    document.getElementById('status').innerHTML = '❌ Error loading study area. Check asset permissions.';
+    document.getElementById('status').innerHTML = '<span class="error">❌ Error loading study area. Check asset permissions.</span>';
   }
 }
 
@@ -232,34 +251,37 @@ function getMonthlyBorder(year, month) {
 async function displayMonth(year, month, showBorder) {
   const key = `${year}-${String(month).padStart(2,'0')}`;
   const statusDiv = document.getElementById('status');
-  statusDiv.innerHTML = `⏳ Loading ${key}... (first load may take 10-20 seconds)`;
+  statusDiv.innerHTML = `<span class="warning">⏳ Loading ${key}... (first load may take 10-20 seconds)</span>`;
   
   if (!waterCache[key]) {
     const waterImage = getMonthlyWater(year, month);
-    const waterUrl = await new Promise((resolve) => {
-      waterImage.getMap({palette: ['#1E90FF'], min: 1, max: 1}, resolve);
+    waterImage.getMap({palette: ['#1E90FF'], min: 1, max: 1}, (waterUrl) => {
+      waterCache[key] = waterUrl;
+      if (currentWaterLayer) map.removeLayer(currentWaterLayer);
+      currentWaterLayer = L.tileLayer(waterUrl.tile_fetcher.url, {opacity: 0.8}).addTo(map);
+      statusDiv.innerHTML = `<span class="success">✅ Displaying: ${key}${showBorder ? ' + border' : ''}</span>`;
     });
-    waterCache[key] = waterUrl;
+  } else {
+    if (currentWaterLayer) map.removeLayer(currentWaterLayer);
+    currentWaterLayer = L.tileLayer(waterCache[key].tile_fetcher.url, {opacity: 0.8}).addTo(map);
   }
-  
-  if (currentWaterLayer) map.removeLayer(currentWaterLayer);
-  currentWaterLayer = L.tileLayer(waterCache[key].tile_fetcher.url, {opacity: 0.8}).addTo(map);
   
   if (showBorder) {
     if (!borderCache[key]) {
       const border = getMonthlyBorder(year, month);
-      const borderUrl = await new Promise((resolve) => {
-        border.getMap({color: 'red', fillColor: '00000000'}, resolve);
+      border.getMap({color: 'red', fillColor: '00000000'}, (borderUrl) => {
+        borderCache[key] = borderUrl;
+        if (currentBorderLayer) map.removeLayer(currentBorderLayer);
+        currentBorderLayer = L.tileLayer(borderUrl.tile_fetcher.url).addTo(map);
       });
-      borderCache[key] = borderUrl;
+    } else {
+      if (currentBorderLayer) map.removeLayer(currentBorderLayer);
+      currentBorderLayer = L.tileLayer(borderCache[key].tile_fetcher.url).addTo(map);
     }
-    if (currentBorderLayer) map.removeLayer(currentBorderLayer);
-    currentBorderLayer = L.tileLayer(borderCache[key].tile_fetcher.url).addTo(map);
   } else if (currentBorderLayer) {
     map.removeLayer(currentBorderLayer);
     currentBorderLayer = null;
   }
-  statusDiv.innerHTML = `✅ Displaying: ${key}${showBorder ? ' + border (red outline)' : ''}`;
 }
 
 // ============================================================
