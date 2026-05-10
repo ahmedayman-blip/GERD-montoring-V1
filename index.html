@@ -5,7 +5,6 @@
   <title>🌊 GERD Water Extent Dashboard</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="https://apis.google.com/js/api.js"></script>
   <style>
     body { margin: 0; padding: 0; font-family: 'Segoe UI', Arial, sans-serif; }
     #map { position: absolute; top: 0; bottom: 0; width: 100%; }
@@ -40,10 +39,13 @@
       font-size: 14px;
     }
     button:hover { background-color: #0052a3; }
+    button:disabled { background-color: #ccc; cursor: not-allowed; }
     .status { margin-top: 10px; font-size: 12px; color: #555; padding: 5px; }
     h3 { margin: 0 0 10px 0; color: #333; }
     hr { margin: 10px 0; }
     .info { font-size: 11px; color: #666; margin: 5px 0; }
+    .error { color: #cc0000; }
+    .success { color: #008800; }
   </style>
 </head>
 <body>
@@ -53,30 +55,26 @@
   <div class="info">Sentinel-1 | VV Threshold: -18 dB</div>
   <hr>
   <select id="monthSelect" disabled>
-    <option>🔐 Please login first</option>
+    <option>⚠️ Please login first</option>
   </select>
   <label style="display:flex; align-items:center; margin: 10px 0;">
     <input type="checkbox" id="borderCheckbox" disabled style="width:auto; margin-right:8px;">
     Show border of largest water body (red outline)
   </label>
-  <div id="status" class="status">⚡ Ready. Click login to start.</div>
-  <button id="loginBtn">🔐 Login with Google (Earth Engine)</button>
+  <div id="status" class="status">⚡ Click "Login to Earth Engine" to start</div>
+  <button id="loginBtn">🔐 Login to Earth Engine</button>
 </div>
 
 <script>
 // ============================================================
-// CONFIGURATION - REPLACE WITH YOUR CLIENT ID
+// CONFIGURATION
 // ============================================================
-const CLIENT_ID = '72180367785-0at6829tckh3v11ngjvpbmfchnafq398.apps.googleusercontent.com';  // ← PASTE YOUR CLIENT ID HERE
-const SCOPES = 'https://www.googleapis.com/auth/earthengine';
-
-// Your ROI asset (GERD reservoir area)
 const ROI_ASSET = 'projects/primal-timing-467912-i8/assets/Intial_2';
 
 // ============================================================
 // GLOBAL VARIABLES
 // ============================================================
-let map, tokenClient, isLoggedIn = false;
+let map, isLoggedIn = false;
 let roiLayer, currentWaterLayer, currentBorderLayer;
 let waterCache = {}, borderCache = {};
 let currentMonth = null;
@@ -95,53 +93,91 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
 }).addTo(map);
 
 // ============================================================
-// OAUTH SETUP
+// LOAD EARTH ENGINE API
 // ============================================================
-function initOAuth() {
-  tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: CLIENT_ID,
-    scope: SCOPES,
-    callback: (tokenResponse) => {
-      if (tokenResponse.access_token) {
-        isLoggedIn = true;
-        document.getElementById('status').innerHTML = '✅ Logged in! Loading Earth Engine...';
-        document.getElementById('loginBtn').style.display = 'none';
-        initEarthEngine();
-      }
-    },
+function loadEarthEngineAPI() {
+  return new Promise((resolve, reject) => {
+    if (window.ee) {
+      resolve();
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://code.earthengine.google.com/ee-api.js';
+    script.onload = () => {
+      // Wait for ee to be initialized
+      const checkEE = setInterval(() => {
+        if (window.ee && window.ee.data) {
+          clearInterval(checkEE);
+          resolve();
+        }
+      }, 100);
+    };
+    script.onerror = reject;
+    document.head.appendChild(script);
   });
 }
 
-function login() {
-  tokenClient.requestAccessToken({ prompt: 'consent' });
-}
-
 // ============================================================
-// EARTH ENGINE INITIALIZATION
+// EARTH ENGINE AUTHENTICATION (Using EE's built-in OAuth)
 // ============================================================
-async function initEarthEngine() {
-  const script = document.createElement('script');
-  script.src = 'https://code.earthengine.google.com/ee-api.js';
-  script.onload = async () => {
-    await new Promise((resolve) => window.ee.initialize(null, null, resolve));
-    document.getElementById('status').innerHTML = '✅ Earth Engine ready! Loading study area...';
-    await loadROI();
-    populateMonths();
-    document.getElementById('monthSelect').disabled = false;
-    document.getElementById('borderCheckbox').disabled = false;
-    document.getElementById('status').innerHTML = '✅ Ready! Select a month to view water extent.';
-  };
-  document.head.appendChild(script);
+async function authenticate() {
+  const statusDiv = document.getElementById('status');
+  const loginBtn = document.getElementById('loginBtn');
+  
+  statusDiv.innerHTML = '⏳ Authenticating with Earth Engine...';
+  loginBtn.disabled = true;
+  
+  try {
+    await loadEarthEngineAPI();
+    
+    // Use Earth Engine's built-in authentication
+    ee.data.authenticate(
+      'https://www.googleapis.com/auth/earthengine',
+      async () => {
+        // Initialize Earth Engine
+        await new Promise((resolve, reject) => {
+          ee.initialize(null, null, resolve, reject);
+        });
+        
+        isLoggedIn = true;
+        statusDiv.innerHTML = '✅ Authenticated! Loading study area...';
+        await loadROI();
+        populateMonths();
+        
+        document.getElementById('monthSelect').disabled = false;
+        document.getElementById('borderCheckbox').disabled = false;
+        loginBtn.style.display = 'none';
+        statusDiv.innerHTML = '✅ Ready! Select a month to view water extent.';
+      },
+      (error) => {
+        console.error('Auth error:', error);
+        statusDiv.innerHTML = '❌ Authentication failed. Please make sure you have Earth Engine access.';
+        loginBtn.disabled = false;
+        loginBtn.style.display = 'block';
+      }
+    );
+  } catch (error) {
+    console.error('Error:', error);
+    statusDiv.innerHTML = '❌ Error loading Earth Engine API. Please refresh and try again.';
+    loginBtn.disabled = false;
+  }
 }
 
 // ============================================================
 // LOAD ROI (GERD reservoir boundary)
 // ============================================================
 async function loadROI() {
-  const roi = ee.FeatureCollection(ROI_ASSET);
-  const roiMap = await roi.getMap({color: 'red', fillColor: '00000000'});
-  if (roiLayer) map.removeLayer(roiLayer);
-  roiLayer = L.tileLayer(roiMap.tile_fetcher.url).addTo(map);
+  try {
+    const roi = ee.FeatureCollection(ROI_ASSET);
+    const roiMap = await new Promise((resolve) => {
+      roi.getMap({color: 'red', fillColor: '00000000'}, resolve);
+    });
+    if (roiLayer) map.removeLayer(roiLayer);
+    roiLayer = L.tileLayer(roiMap.tile_fetcher.url).addTo(map);
+  } catch (error) {
+    console.error('Error loading ROI:', error);
+    document.getElementById('status').innerHTML = '❌ Error loading study area. Check asset permissions.';
+  }
 }
 
 // ============================================================
@@ -174,7 +210,6 @@ function waterFromImage(img) {
 }
 
 function getMonthlyWater(year, month) {
-  const roi = ee.FeatureCollection(ROI_ASSET);
   const start = ee.Date.fromYMD(year, month, 1);
   const end = start.advance(1, 'month').advance(-1, 'day');
   const monthly = getS1Collection().filterDate(start, end);
@@ -201,7 +236,9 @@ async function displayMonth(year, month, showBorder) {
   
   if (!waterCache[key]) {
     const waterImage = getMonthlyWater(year, month);
-    const waterUrl = await waterImage.getMap({palette: ['#1E90FF'], min: 1, max: 1});
+    const waterUrl = await new Promise((resolve) => {
+      waterImage.getMap({palette: ['#1E90FF'], min: 1, max: 1}, resolve);
+    });
     waterCache[key] = waterUrl;
   }
   
@@ -211,7 +248,9 @@ async function displayMonth(year, month, showBorder) {
   if (showBorder) {
     if (!borderCache[key]) {
       const border = getMonthlyBorder(year, month);
-      const borderUrl = await border.getMap({color: 'red', fillColor: '00000000'});
+      const borderUrl = await new Promise((resolve) => {
+        border.getMap({color: 'red', fillColor: '00000000'}, resolve);
+      });
       borderCache[key] = borderUrl;
     }
     if (currentBorderLayer) map.removeLayer(currentBorderLayer);
@@ -258,11 +297,9 @@ document.getElementById('borderCheckbox').addEventListener('change', async (e) =
 });
 
 // ============================================================
-// INITIALIZE
+// INITIALIZE - Attach login button
 // ============================================================
-document.getElementById('loginBtn').addEventListener('click', login);
-initOAuth();
+document.getElementById('loginBtn').addEventListener('click', authenticate);
 </script>
-<script src="https://accounts.google.com/gsi/client" async defer></script>
 </body>
 </html>
