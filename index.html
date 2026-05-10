@@ -17,8 +17,9 @@
       padding: 15px;
       border-radius: 8px;
       box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-      min-width: 280px;
+      min-width: 300px;
       border: 1px solid #ddd;
+      font-size: 13px;
     }
     select { 
       width: 100%; 
@@ -40,13 +41,28 @@
     }
     button:hover { background-color: #0052a3; }
     button:disabled { background-color: #ccc; cursor: not-allowed; }
-    .status { margin-top: 10px; font-size: 12px; padding: 5px; white-space: pre-wrap; }
-    h3 { margin: 0 0 10px 0; color: #333; }
+    .status { 
+      margin-top: 10px; 
+      font-size: 11px; 
+      padding: 8px; 
+      white-space: pre-wrap;
+      line-height: 1.4;
+    }
+    h3 { margin: 0 0 10px 0; color: #333; font-size: 16px; }
     hr { margin: 10px 0; }
     .info { font-size: 11px; color: #666; margin: 5px 0; }
     .error { color: #cc0000; }
     .success { color: #008800; }
     .warning { color: #cc6600; }
+    .instructions {
+      background: #f9f9f9;
+      padding: 10px;
+      border-radius: 4px;
+      font-size: 10px;
+      color: #666;
+      margin-top: 10px;
+      line-height: 1.3;
+    }
   </style>
 </head>
 <body>
@@ -60,12 +76,19 @@
   </select>
   <label style="display:flex; align-items:center; margin: 10px 0;">
     <input type="checkbox" id="borderCheckbox" disabled style="width:auto; margin-right:8px;">
-    Show border of largest water body (red outline)
+    Show border of largest water body
   </label>
-  <div id="status" class="status warning">⚡ Loading Earth Engine API...</div>
+  <div id="status" class="status warning">⏳ Initializing...</div>
   <button id="loginBtn" disabled>🔐 Login to Earth Engine</button>
+  <div class="instructions" id="instructions" style="display:none;">
+    ℹ️ This dashboard requires Earth Engine access. 
+    If you see CORS errors, try:
+    • Using the Earth Engine Code Editor instead
+    • Or deploying via Google Apps Script
+  </div>
 </div>
 
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <script>
 // ============================================================
 // CONFIGURATION
@@ -96,69 +119,59 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
 }).addTo(map);
 
 // ============================================================
-// LOAD EARTH ENGINE API WITH RETRY
+// LOAD EARTH ENGINE API
 // ============================================================
 function loadEarthEngineAPI() {
   return new Promise((resolve, reject) => {
-    const maxRetries = 5;
-    let retryCount = 0;
-
-    function attemptLoad() {
-      // Check if ee is already loaded globally
-      if (window.ee) {
-        console.log('✅ Earth Engine API detected globally');
-        ee = window.ee;
-        eeReady = true;
-        resolve();
-        return;
-      }
-
-      retryCount++;
-      console.log(`Attempt ${retryCount}/${maxRetries} to load Earth Engine API...`);
-
-      if (retryCount > maxRetries) {
-        reject(new Error('Failed to load Earth Engine API after multiple attempts. Check your internet connection.'));
-        return;
-      }
-
-      // Try loading the script
-      const script = document.createElement('script');
-      script.src = 'https://code.earthengine.google.com/ee_api_js.js?v=' + Date.now();
-      script.async = true;
-      script.defer = true;
-
-      script.onload = () => {
-        console.log('Script loaded, waiting for ee to initialize...');
-        // Give it a moment to initialize
-        setTimeout(() => {
-          if (window.ee) {
-            console.log('✅ Earth Engine API initialized');
-            ee = window.ee;
-            eeReady = true;
-            resolve();
-          } else {
-            console.log('ee not found after script load, retrying...');
-            setTimeout(attemptLoad, 1000);
-          }
-        }, 500);
-      };
-
-      script.onerror = () => {
-        console.error(`Script load failed, retrying... (${retryCount}/${maxRetries})`);
-        setTimeout(attemptLoad, 1500);
-      };
-
-      document.head.appendChild(script);
+    // Check if ee is already loaded
+    if (window.ee) {
+      console.log('✅ Earth Engine API already loaded');
+      ee = window.ee;
+      eeReady = true;
+      resolve();
+      return;
     }
 
-    attemptLoad();
+    console.log('Loading Earth Engine API script...');
+    
+    const script = document.createElement('script');
+    script.src = 'https://code.earthengine.google.com/ee_api_js.js';
+    script.async = true;
+    script.type = 'text/javascript';
+    
+    // Set crossorigin to allow CORS
+    script.crossOrigin = 'anonymous';
+    
+    let timeout;
+    
+    script.onload = () => {
+      console.log('Script loaded, checking for ee object...');
+      timeout = setTimeout(() => {
+        if (window.ee) {
+          console.log('✅ Earth Engine API initialized');
+          ee = window.ee;
+          eeReady = true;
+          resolve();
+        } else {
+          reject(new Error('Earth Engine API script loaded but ee object not found'));
+        }
+      }, 1000);
+    };
+    
+    script.onerror = (e) => {
+      console.error('Script load error:', e);
+      reject(new Error('Failed to load Earth Engine API script. This may be due to CORS restrictions.'));
+    };
+    
+    document.head.appendChild(script);
     
     // Overall timeout
     setTimeout(() => {
       if (!eeReady) {
-        reject(new Error('Earth Engine API load timeout'));
+        clearTimeout(timeout);
+        reject(new Error('Earth Engine API load timeout (> 20 seconds)'));
       }
-    }, 30000);
+    }, 20000);
   });
 }
 
@@ -169,18 +182,22 @@ async function authenticate() {
   const statusDiv = document.getElementById('status');
   const loginBtn = document.getElementById('loginBtn');
   
-  statusDiv.innerHTML = '<span class="warning">⏳ Authenticating with Earth Engine...</span>';
+  statusDiv.innerHTML = '<span class="warning">⏳ Starting authentication...</span>';
   loginBtn.disabled = true;
   
   try {
     if (!eeReady || !window.ee) {
-      throw new Error('Earth Engine API not ready. Please wait for it to load.');
+      throw new Error('Earth Engine API not initialized. Refresh and try again.');
     }
     
-    // Use Earth Engine's popup authentication
+    console.log('Attempting Earth Engine authentication...');
+    
+    // Authenticate
     ee.data.authenticateViaPopup(() => {
-      console.log('✅ Authentication successful');
+      console.log('✅ Authentication callback received');
+      
       ee.initialize(null, null, () => {
+        console.log('✅ Earth Engine initialized successfully');
         isLoggedIn = true;
         statusDiv.innerHTML = '<span class="success">✅ Authenticated! Loading study area...</span>';
         
@@ -191,15 +208,20 @@ async function authenticate() {
         document.getElementById('borderCheckbox').disabled = false;
         loginBtn.style.display = 'none';
         statusDiv.innerHTML = '<span class="success">✅ Ready! Select a month to view water extent.</span>';
+      }, (initError) => {
+        console.error('EE init error:', initError);
+        statusDiv.innerHTML = '<span class="error">❌ Earth Engine initialization failed\n\nMake sure you have:\n✓ Google account\n✓ Earth Engine access\n✓ Proper permissions</span>';
+        loginBtn.disabled = false;
       });
-    }, (error) => {
-      console.error('Auth error:', error);
-      statusDiv.innerHTML = '<span class="error">❌ Authentication failed.\n\nMake sure:\n1. You have a Google account\n2. You have Earth Engine access\n(visit earthengine.google.com)\n3. Popups are enabled</span>';
+    }, (authError) => {
+      console.error('Auth error:', authError);
+      statusDiv.innerHTML = '<span class="error">❌ Authentication failed\n\nCheck:\n• Google account logged in\n• Popups not blocked\n• Earth Engine access granted</span>';
       loginBtn.disabled = false;
     });
   } catch (error) {
     console.error('Error:', error);
-    statusDiv.innerHTML = `<span class="error">❌ ${error.message}</span>`;
+    statusDiv.innerHTML = `<span class="error">❌ Error: ${error.message}\n\n🔧 Troubleshooting:\n• Hard refresh (Ctrl+Shift+R)\n• Check browser console (F12)\n• Try different browser</span>`;
+    document.getElementById('instructions').style.display = 'block';
     loginBtn.disabled = false;
   }
 }
@@ -216,7 +238,7 @@ async function loadROI() {
     });
   } catch (error) {
     console.error('Error loading ROI:', error);
-    document.getElementById('status').innerHTML = '<span class="error">❌ Error loading study area.\n\nCheck:\n1. Asset path is correct\n2. You have access to the asset</span>';
+    document.getElementById('status').innerHTML = '<span class="error">❌ Error loading study area\n\nCheck asset permissions and path</span>';
   }
 }
 
@@ -272,7 +294,7 @@ function getMonthlyBorder(year, month) {
 async function displayMonth(year, month, showBorder) {
   const key = `${year}-${String(month).padStart(2,'0')}`;
   const statusDiv = document.getElementById('status');
-  statusDiv.innerHTML = `<span class="warning">⏳ Loading ${key}...\n(first load may take 10-20 seconds)</span>`;
+  statusDiv.innerHTML = `<span class="warning">⏳ Loading ${key}...\n(first load: 10-20 seconds)</span>`;
   
   if (!waterCache[key]) {
     const waterImage = getMonthlyWater(year, month);
@@ -280,11 +302,12 @@ async function displayMonth(year, month, showBorder) {
       waterCache[key] = waterUrl;
       if (currentWaterLayer) map.removeLayer(currentWaterLayer);
       currentWaterLayer = L.tileLayer(waterUrl.tile_fetcher.url, {opacity: 0.8}).addTo(map);
-      statusDiv.innerHTML = `<span class="success">✅ Displaying: ${key}${showBorder ? ' + border' : ''}</span>`;
+      statusDiv.innerHTML = `<span class="success">✅ ${key}${showBorder ? ' + border' : ''}</span>`;
     });
   } else {
     if (currentWaterLayer) map.removeLayer(currentWaterLayer);
     currentWaterLayer = L.tileLayer(waterCache[key].tile_fetcher.url, {opacity: 0.8}).addTo(map);
+    statusDiv.innerHTML = `<span class="success">✅ ${key}${showBorder ? ' + border' : ''}</span>`;
   }
   
   if (showBorder) {
@@ -306,7 +329,7 @@ async function displayMonth(year, month, showBorder) {
 }
 
 // ============================================================
-// POPULATE MONTH DROPDOWN (2021-01 to 2025-12)
+// POPULATE MONTH DROPDOWN
 // ============================================================
 function populateMonths() {
   const select = document.getElementById('monthSelect');
@@ -340,20 +363,20 @@ document.getElementById('borderCheckbox').addEventListener('change', async (e) =
 });
 
 // ============================================================
-// INITIALIZE - Load API and attach login button
+// INITIALIZE - Load API on page load
 // ============================================================
 document.getElementById('loginBtn').addEventListener('click', authenticate);
 
-// Load the Earth Engine API on page load
 loadEarthEngineAPI()
   .then(() => {
     console.log('✅ Earth Engine API ready');
-    document.getElementById('status').innerHTML = '<span class="success">✅ Earth Engine API loaded. Click login to continue.</span>';
+    document.getElementById('status').innerHTML = '<span class="success">✅ Ready!\n\nClick "Login to Earth Engine" to continue</span>';
     document.getElementById('loginBtn').disabled = false;
   })
   .catch((error) => {
     console.error('Failed to load Earth Engine API:', error);
-    document.getElementById('status').innerHTML = `<span class="error">❌ ${error.message}\n\nTroubleshooting:\n1. Check your internet\n2. Refresh the page\n3. Try a different browser</span>`;
+    document.getElementById('status').innerHTML = `<span class="error">❌ ${error.message}\n\n⚠️ CORS Restriction Detected\n\nAlternative options:\n• Use Earth Engine Code Editor\n• Deploy via Google Apps Script\n• Set up a backend server</span>`;
+    document.getElementById('instructions').style.display = 'block';
     document.getElementById('loginBtn').disabled = true;
   });
 </script>
