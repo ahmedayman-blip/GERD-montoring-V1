@@ -66,6 +66,7 @@
   <button id="loginBtn">🔐 Login to Earth Engine</button>
 </div>
 
+<script src="https://code.earthengine.google.com/ee_api_js.js"></script>
 <script>
 // ============================================================
 // CONFIGURATION
@@ -95,90 +96,46 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
 }).addTo(map);
 
 // ============================================================
-// LOAD EARTH ENGINE API - FIXED VERSION
-// ============================================================
-function loadEarthEngineAPI() {
-  return new Promise((resolve, reject) => {
-    // Check if already loaded
-    if (window.ee) {
-      ee = window.ee;
-      resolve();
-      return;
-    }
-    
-    // Load the Earth Engine API script
-    const script = document.createElement('script');
-    script.src = 'https://code.earthengine.google.com/ee-api.js?init=initEE';
-    script.async = true;
-    
-    // Set up global callback
-    window.initEE = function() {
-      if (window.ee) {
-        ee = window.ee;
-        resolve();
-      } else {
-        reject(new Error('Earth Engine API failed to initialize'));
-      }
-    };
-    
-    script.onerror = () => reject(new Error('Failed to load Earth Engine API script'));
-    document.head.appendChild(script);
-    
-    // Timeout after 15 seconds
-    setTimeout(() => reject(new Error('Earth Engine API load timeout')), 15000);
-  });
-}
-
-// ============================================================
-// EARTH ENGINE AUTHENTICATION (Using EE's built-in OAuth)
+// EARTH ENGINE AUTHENTICATION
 // ============================================================
 async function authenticate() {
   const statusDiv = document.getElementById('status');
   const loginBtn = document.getElementById('loginBtn');
   
-  statusDiv.innerHTML = '<span class="warning">⏳ Loading Earth Engine API...</span>';
+  statusDiv.innerHTML = '<span class="warning">⏳ Authenticating with Earth Engine...</span>';
   loginBtn.disabled = true;
   
   try {
-    // Load API first
-    await loadEarthEngineAPI();
-    statusDiv.innerHTML = '<span class="warning">⏳ Earth Engine API loaded. Authenticating...</span>';
+    // Wait for ee to be available globally
+    if (!window.ee) {
+      throw new Error('Earth Engine API not loaded. Ensure you have internet and try refreshing.');
+    }
     
-    // Use Earth Engine's built-in authentication
-    ee.data.authenticate(
-      'https://www.googleapis.com/auth/earthengine',
-      () => {
-        // Initialize Earth Engine
-        ee.initialize(null, null, 
-          () => {
-            // Success
-            isLoggedIn = true;
-            statusDiv.innerHTML = '<span class="success">✅ Authenticated! Loading study area...</span>';
-            loadROI();
-            populateMonths();
-            
-            document.getElementById('monthSelect').disabled = false;
-            document.getElementById('borderCheckbox').disabled = false;
-            loginBtn.style.display = 'none';
-            statusDiv.innerHTML = '<span class="success">✅ Ready! Select a month to view water extent.</span>';
-          },
-          (error) => {
-            console.error('EE init error:', error);
-            statusDiv.innerHTML = '<span class="error">❌ Earth Engine initialization failed. Please make sure you have Earth Engine access.</span>';
-            loginBtn.disabled = false;
-          }
-        );
-      },
-      (error) => {
-        console.error('Auth error:', error);
-        statusDiv.innerHTML = '<span class="error">❌ Authentication failed. Please make sure you:\n1. Have a Google account\n2. Have Earth Engine access (sign up at earthengine.google.com)\n3. Are logged into Google in this browser</span>';
-        loginBtn.disabled = false;
-        loginBtn.style.display = 'block';
-      }
-    );
+    ee = window.ee;
+    
+    // Authenticate
+    ee.data.authenticateViaPopup(() => {
+      console.log('Authentication successful');
+      ee.initialize(null, null, () => {
+        isLoggedIn = true;
+        statusDiv.innerHTML = '<span class="success">✅ Authenticated! Loading study area...</span>';
+        
+        loadROI();
+        populateMonths();
+        
+        document.getElementById('monthSelect').disabled = false;
+        document.getElementById('borderCheckbox').disabled = false;
+        loginBtn.style.display = 'none';
+        statusDiv.innerHTML = '<span class="success">✅ Ready! Select a month to view water extent.</span>';
+      });
+    }, (error) => {
+      console.error('Auth error:', error);
+      statusDiv.innerHTML = '<span class="error">❌ Authentication failed. Make sure:\n1. You have a Google account\n2. You have Earth Engine access (earthengine.google.com)\n3. Popups are allowed</span>';
+      loginBtn.disabled = false;
+    });
   } catch (error) {
     console.error('Error:', error);
-    statusDiv.innerHTML = `<span class="error">❌ ${error.message}. Please refresh the page and try again.</span>`;
+    statusDiv.innerHTML = `<span class="error">❌ ${error.message}</span>`;
     loginBtn.disabled = false;
   }
 }
