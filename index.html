@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>🌊 GERD Water Extent Dashboard</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://apis.google.com/js/api.js"></script>
+  <style>
+    body { margin: 0; padding: 0; font-family: 'Segoe UI', Arial, sans-serif; }
+    #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+    .panel {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      z-index: 1000;
+      background: white;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+      min-width: 280px;
+      border: 1px solid #ddd;
+    }
+    select { 
+      width: 100%; 
+      margin: 10px 0; 
+      padding: 8px; 
+      border-radius: 4px;
+      border: 1px solid #ccc;
+    }
+    button {
+      width: 100%;
+      margin: 10px 0;
+      padding: 10px;
+      background-color: #0066cc;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:hover { background-color: #0052a3; }
+    .status { margin-top: 10px; font-size: 12px; color: #555; padding: 5px; }
+    h3 { margin: 0 0 10px 0; color: #333; }
+    hr { margin: 10px 0; }
+    .info { font-size: 11px; color: #666; margin: 5px 0; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div class="panel">
+  <h3>🌊 GERD Water Extent Dashboard</h3>
+  <div class="info">Sentinel-1 | VV Threshold: -18 dB</div>
+  <hr>
+  <select id="monthSelect" disabled>
+    <option>🔐 Please login first</option>
+  </select>
+  <label style="display:flex; align-items:center; margin: 10px 0;">
+    <input type="checkbox" id="borderCheckbox" disabled style="width:auto; margin-right:8px;">
+    Show border of largest water body (red outline)
+  </label>
+  <div id="status" class="status">⚡ Ready. Click login to start.</div>
+  <button id="loginBtn">🔐 Login with Google (Earth Engine)</button>
+</div>
+
+<script>
+// ============================================================
+// CONFIGURATION - REPLACE WITH YOUR CLIENT ID
+// ============================================================
+const CLIENT_ID = '72180367785-0at6829tckh3v11ngjvpbmfchnafq398.apps.googleusercontent.com';  // ← PASTE YOUR CLIENT ID HERE
+const SCOPES = 'https://www.googleapis.com/auth/earthengine';
+
+// Your ROI asset (GERD reservoir area)
+const ROI_ASSET = 'projects/primal-timing-467912-i8/assets/Intial_2';
+
+// ============================================================
+// GLOBAL VARIABLES
+// ============================================================
+let map, tokenClient, isLoggedIn = false;
+let roiLayer, currentWaterLayer, currentBorderLayer;
+let waterCache = {}, borderCache = {};
+let currentMonth = null;
+
+// Parameters
+const startYear = 2021, endYear = 2025;
+const orbits = [50, 123, 152, 79];
+const threshold = -18;
+
+// ============================================================
+// INITIALIZE MAP (GERD region)
+// ============================================================
+map = L.map('map').setView([12.0, 37.0], 9);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> | GERD Reservoir'
+}).addTo(map);
+
+// ============================================================
+// OAUTH SETUP
+// ============================================================
+function initOAuth() {
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: CLIENT_ID,
+    scope: SCOPES,
+    callback: (tokenResponse) => {
+      if (tokenResponse.access_token) {
+        isLoggedIn = true;
+        document.getElementById('status').innerHTML = '✅ Logged in! Loading Earth Engine...';
+        document.getElementById('loginBtn').style.display = 'none';
+        initEarthEngine();
+      }
+    },
+  });
+}
+
+function login() {
+  tokenClient.requestAccessToken({ prompt: 'consent' });
+}
+
+// ============================================================
+// EARTH ENGINE INITIALIZATION
+// ============================================================
+async function initEarthEngine() {
+  const script = document.createElement('script');
+  script.src = 'https://code.earthengine.google.com/ee-api.js';
+  script.onload = async () => {
+    await new Promise((resolve) => window.ee.initialize(null, null, resolve));
+    document.getElementById('status').innerHTML = '✅ Earth Engine ready! Loading study area...';
+    await loadROI();
+    populateMonths();
+    document.getElementById('monthSelect').disabled = false;
+    document.getElementById('borderCheckbox').disabled = false;
+    document.getElementById('status').innerHTML = '✅ Ready! Select a month to view water extent.';
+  };
+  document.head.appendChild(script);
+}
+
+// ============================================================
+// LOAD ROI (GERD reservoir boundary)
+// ============================================================
+async function loadROI() {
+  const roi = ee.FeatureCollection(ROI_ASSET);
+  const roiMap = await roi.getMap({color: 'red', fillColor: '00000000'});
+  if (roiLayer) map.removeLayer(roiLayer);
+  roiLayer = L.tileLayer(roiMap.tile_fetcher.url).addTo(map);
+}
+
+// ============================================================
+// SENTINEL-1 PROCESSING FUNCTIONS
+// ============================================================
+function getS1Collection() {
+  const roi = ee.FeatureCollection(ROI_ASSET);
+  return ee.ImageCollection('COPERNICUS/S1_GRD')
+    .filterBounds(roi)
+    .filterDate(ee.Date.fromYMD(startYear,1,1), ee.Date.fromYMD(endYear,12,31))
+    .filter(ee.Filter.eq('instrumentMode', 'IW'))
+    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+    .filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'))
+    .filter(ee.Filter.inList('relativeOrbitNumber_start', orbits));
+}
+
+function speckle(img) {
+  const toNatural = i => ee.Image(10).pow(i.divide(10));
+  const toDb = i => ee.Image(i).log10().multiply(10);
+  const vv_vh = img.select(['VV', 'VH']);
+  const smoothed = toNatural(vv_vh).focal_mean(30, 'meters');
+  return toDb(smoothed);
+}
+
+function waterFromImage(img) {
+  const roi = ee.FeatureCollection(ROI_ASSET);
+  const smooth = speckle(img).clip(roi);
+  return smooth.select('VV').lt(threshold).selfMask().rename('water');
+}
+
+function getMonthlyWater(year, month) {
+  const roi = ee.FeatureCollection(ROI_ASSET);
+  const start = ee.Date.fromYMD(year, month, 1);
+  const end = start.advance(1, 'month').advance(-1, 'day');
+  const monthly = getS1Collection().filterDate(start, end);
+  const waterCol = monthly.map(waterFromImage);
+  return waterCol.select('water').max().selfMask();
+}
+
+function getMonthlyBorder(year, month) {
+  const roi = ee.FeatureCollection(ROI_ASSET);
+  const water = getMonthlyWater(year, month);
+  const vectors = water.selfMask().reduceToVectors({geometry: roi, scale: 30, maxPixels: 1e13});
+  const withArea = vectors.map(f => f.set('area_m2', f.area(1)));
+  const maxArea = withArea.reduceColumns(ee.Reducer.max(), ['area_m2']).get('max');
+  return withArea.filter(ee.Filter.eq('area_m2', maxArea));
+}
+
+// ============================================================
+// DISPLAY FUNCTIONS
+// ============================================================
+async function displayMonth(year, month, showBorder) {
+  const key = `${year}-${String(month).padStart(2,'0')}`;
+  const statusDiv = document.getElementById('status');
+  statusDiv.innerHTML = `⏳ Loading ${key}... (first load may take 10-20 seconds)`;
+  
+  if (!waterCache[key]) {
+    const waterImage = getMonthlyWater(year, month);
+    const waterUrl = await waterImage.getMap({palette: ['#1E90FF'], min: 1, max: 1});
+    waterCache[key] = waterUrl;
+  }
+  
+  if (currentWaterLayer) map.removeLayer(currentWaterLayer);
+  currentWaterLayer = L.tileLayer(waterCache[key].tile_fetcher.url, {opacity: 0.8}).addTo(map);
+  
+  if (showBorder) {
+    if (!borderCache[key]) {
+      const border = getMonthlyBorder(year, month);
+      const borderUrl = await border.getMap({color: 'red', fillColor: '00000000'});
+      borderCache[key] = borderUrl;
+    }
+    if (currentBorderLayer) map.removeLayer(currentBorderLayer);
+    currentBorderLayer = L.tileLayer(borderCache[key].tile_fetcher.url).addTo(map);
+  } else if (currentBorderLayer) {
+    map.removeLayer(currentBorderLayer);
+    currentBorderLayer = null;
+  }
+  statusDiv.innerHTML = `✅ Displaying: ${key}${showBorder ? ' + border (red outline)' : ''}`;
+}
+
+// ============================================================
+// POPULATE MONTH DROPDOWN (2021-01 to 2025-12)
+// ============================================================
+function populateMonths() {
+  const select = document.getElementById('monthSelect');
+  select.innerHTML = '';
+  for (let y = startYear; y <= endYear; y++) {
+    for (let m = 1; m <= 12; m++) {
+      const val = `${y}-${String(m).padStart(2,'0')}`;
+      const opt = document.createElement('option');
+      opt.value = val;
+      opt.textContent = val;
+      select.appendChild(opt);
+    }
+  }
+  select.addEventListener('change', async (e) => {
+    if (!e.target.value) return;
+    const [y, m] = e.target.value.split('-').map(Number);
+    currentMonth = e.target.value;
+    const showBorder = document.getElementById('borderCheckbox').checked;
+    await displayMonth(y, m, showBorder);
+  });
+}
+
+// ============================================================
+// BORDER CHECKBOX EVENT
+// ============================================================
+document.getElementById('borderCheckbox').addEventListener('change', async (e) => {
+  if (currentMonth) {
+    const [y, m] = currentMonth.split('-').map(Number);
+    await displayMonth(y, m, e.target.checked);
+  }
+});
+
+// ============================================================
+// INITIALIZE
+// ============================================================
+document.getElementById('loginBtn').addEventListener('click', login);
+initOAuth();
+</script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</body>
+</html>
